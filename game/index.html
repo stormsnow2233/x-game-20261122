@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frog Hop — a tiny browser game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #0f2b1d;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: #eafff3; overflow: hidden;
+  }
+  h1 { font-size: 30px; letter-spacing: 2px; margin-bottom: 4px; }
+  h1 span { color: #7be495; }
+  .tag { font-size: 13px; color: #9fd8b4; margin-bottom: 10px; }
+  #wrap {
+    position: relative; width: min(96vw, 960px);
+    border-radius: 18px; overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 3px #1e5c38;
+  }
+  canvas { display: block; width: 100%; height: auto; background: #7ec8f7; cursor: pointer; }
+  .hint { margin-top: 10px; font-size: 14px; color: #bfe9cd; }
+  .hint b { color: #fff; }
+  .foot { margin-top: 6px; font-size: 12px; color: #6fae86; }
+  .foot a { color: #7be495; text-decoration: none; }
+</style>
+</head>
+<body>
+  <h1>🐸 FROG <span>HOP</span></h1>
+  <div class="tag">a tiny browser game — built by an AI agent from one prompt</div>
+  <div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+  <div class="hint"><b>Click</b> or press <b>SPACE</b> to hop &nbsp;·&nbsp; land on lily pads &nbsp;·&nbsp; eat flies for +5 &nbsp;·&nbsp; don't splash!</div>
+  <div class="foot">Made by an AI agent on <a href="https://make.fun">make.fun</a> — come build yours.</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = 960, H = 540;
+  const WATER_Y = 430;               // top of the water
+  const GRAV = 0.55, JUMP_V = -12.2; // frog physics
+  const DEMO = new URLSearchParams(location.search).has('demo');
+
+  let state = 'start';               // start | play | over
+  let score = 0, best = +(localStorage.getItem('froghop-best') || 0);
+  let speed = 2.6, time = 0, overAt = 0;
+  let pads = [], flies = [], parts = [], clouds = [];
+  let frog = null;
+  const stats = { jumps: 0, lands: 0, splashes: 0 };
+
+  function newFrog() {
+    return { x: 200, y: WATER_Y - 46, vy: 0, onPad: null, squash: 0, dead: false };
+  }
+  function newPad(x, y) {
+    return {
+      x, y, w: 96 + Math.random() * 44, h: 18,
+      flower: Math.random() < 0.3, hue: 95 + Math.random() * 30,
+      landed: false, seed: Math.random() * 10
+    };
+  }
+  function reset() {
+    score = 0; speed = 2.6; time = 0; parts = []; flies = [];
+    pads = [newPad(120, WATER_Y - 8)];
+    pads[0].w = 150;
+    for (let i = 1; i < 7; i++) pads.push(newPad(280 + i * 150, WATER_Y - 8 - (Math.random() * 26 | 0)));
+    frog = newFrog();
+    frog.onPad = pads[0];
+    state = 'play';
+  }
+
+  // ---------- drawing helpers ----------
+  function drawFrog(f, t) {
+    const x = f.x, y = f.y, s = f.squash;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1 + s * 0.12, 1 - s * 0.12);
+    // legs
+    ctx.fillStyle = '#3f9e4d';
+    ctx.beginPath(); ctx.ellipse(-22, 12, 12, 7, -0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(22, 12, 12, 7, 0.5, 0, Math.PI * 2); ctx.fill();
+    // body
+    const g = ctx.createRadialGradient(-8, -10, 4, 0, 0, 34);
+    g.addColorStop(0, '#8fe388'); g.addColorStop(1, '#43b04f');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 0, 30, 24, 0, 0, Math.PI * 2); ctx.fill();
+    // belly
+    ctx.fillStyle = '#d8f7c9';
+    ctx.beginPath(); ctx.ellipse(0, 8, 18, 11, 0, 0, Math.PI * 2); ctx.fill();
+    // eyes
+    for (const dx of [-13, 13]) {
+      ctx.fillStyle = '#43b04f';
+      ctx.beginPath(); ctx.arc(dx, -20, 11, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(dx, -21, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#14261a';
+      ctx.beginPath(); ctx.arc(dx + 2, -21, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(dx + 3.5, -23, 1.4, 0, Math.PI * 2); ctx.fill();
+    }
+    // cheeks + smile
+    ctx.fillStyle = 'rgba(255,150,170,.55)';
+    ctx.beginPath(); ctx.arc(-20, -2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(20, -2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#1d5c2a'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 2, 9, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPad(p, t) {
+    const bob = Math.sin(t / 28 + p.seed) * 2;
+    ctx.save();
+    ctx.translate(p.x + p.w / 2, p.y + bob);
+    ctx.fillStyle = `hsl(${p.hue}, 55%, 38%)`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.w / 2, p.h / 2 + 4, 0, 0.35, Math.PI * 2 - 0.35);
+    ctx.lineTo(0, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = `hsl(${p.hue}, 60%, 48%)`;
+    ctx.beginPath();
+    ctx.ellipse(-2, -3, p.w / 2 - 4, p.h / 2 + 1, 0, 0.35, Math.PI * 2 - 0.35);
+    ctx.lineTo(-2, -3); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-p.w / 4, -2); ctx.lineTo(p.w / 4, -2); ctx.stroke();
+    if (p.flower) {
+      ctx.fillStyle = '#ff8fd0';
+      for (let i = 0; i < 5; i++) {
+        const a = i / 5 * Math.PI * 2;
+        ctx.beginPath(); ctx.ellipse(Math.cos(a) * 7, -8 + Math.sin(a) * 5, 6, 4, a, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = '#ffd94d';
+      ctx.beginPath(); ctx.arc(0, -8, 4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawFly(f, t) {
+    const wob = Math.sin(t / 9 + f.seed) * 5;
+    ctx.save();
+    ctx.translate(f.x, f.y + wob);
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.beginPath(); ctx.ellipse(-4, -4, 5, 3, -0.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4, -4, 5, 3, 0.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#22301f';
+    ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-1.5, -1, 1.4, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      parts.push({ x, y, vx: (Math.random() - 0.5) * 6, vy: -Math.random() * 5 - 1,
+                   life: 22 + Math.random() * 14, color });
+    }
+  }
+
+  // ---------- game logic ----------
+  function jump() {
+    if (state === 'start') { reset(); return; }
+    if (state === 'over') { if (time - overAt > 40) reset(); return; }
+    if (frog.onPad) {
+      frog.vy = JUMP_V; frog.onPad = null; frog.squash = -1;
+      stats.jumps++;
+      burst(frog.x, frog.y + 16, 'rgba(255,255,255,.9)', 6);
+    }
+  }
+
+  function update() {
+    time++;
+    if (state === 'start') return;
+    if (state === 'over') {
+      if (DEMO && time - overAt > 30) reset();
+      updateFx();
+      return;
+    }
+    speed = Math.min(5.2, 2.6 + score * 0.035);
+    // The frog stays near x=200 (camera follows it); the pond scrolls.
+    // While airborne the world always scrolls at 5.2 px/frame, so every hop
+    // covers the same distance no matter how fast the game gets.
+    const airborne = !frog.onPad;
+    const scroll = airborne ? 5.2 : speed;
+
+    // frog physics
+    frog.vy += GRAV;
+    frog.y += frog.vy;
+    frog.squash *= 0.86;
+
+    // pads scroll left; recycle
+    for (const p of pads) p.x -= scroll;
+    while (pads.length && pads[0].x + pads[0].w < -20) pads.shift();
+    const last = pads[pads.length - 1];
+    if (last.x + last.w < W + 40) {
+      const gap = 120 + Math.random() * 55 + Math.min(40, score);
+      const np = newPad(last.x + last.w + gap, WATER_Y - 8 - (Math.random() * 26 | 0));
+      pads.push(np);
+      if (Math.random() < 0.55) flies.push({ x: np.x + np.w / 2, y: np.y - 72, seed: Math.random() * 9 });
+    }
+    for (const f of flies) f.x -= scroll;
+    flies = flies.filter(f => f.x > -20);
+
+    // standing on a pad: the pad slides out from under the frog if it waits
+    if (frog.onPad) {
+      const p = frog.onPad;
+      if (frog.x < p.x - 10 || frog.x > p.x + p.w + 10) { frog.onPad = null; }
+      else frog.y = p.y - 26;
+    }
+
+    // landing
+    if (frog.vy > 0) {
+      for (const p of pads) {
+        const top = p.y - 4;
+        if (frog.x > p.x - 8 && frog.x < p.x + p.w + 8 &&
+            frog.y + 22 >= top && frog.y + 22 <= top + 16) {
+          frog.y = top - 22; frog.vy = 0;
+          if (frog.onPad !== p) {
+            frog.onPad = p; frog.squash = 1;
+            stats.lands++;
+            if (!p.landed) { p.landed = true; score++; }
+            burst(frog.x, top, 'rgba(180,255,200,.9)', 5);
+          }
+          break;
+        }
+      }
+    }
+
+    // flies
+    for (let i = flies.length - 1; i >= 0; i--) {
+      const f = flies[i];
+      if (Math.hypot(f.x - frog.x, f.y - frog.y) < 34) {
+        flies.splice(i, 1); score += 5;
+        burst(f.x, f.y, '#ffd94d', 10);
+      }
+    }
+
+    // fell into the water
+    if (frog.y > WATER_Y + 26) {
+      state = 'over'; overAt = time;
+      stats.splashes++;
+      best = Math.max(best, score);
+      localStorage.setItem('froghop-best', best);
+      burst(frog.x, WATER_Y + 6, '#9fdcff', 26);
+    }
+
+    // demo auto-player: hop when a pad ahead is at the right distance.
+    // A pad whose front is d ahead is landable when d lies in
+    // [travel - w, travel] (travel = how far pads scroll during one hop).
+    // Aim for the middle of the window so the frog lands mid-pad; if the
+    // current pad is about to slide out, take any landable pad. If the
+    // nearest pad is already too close, try the one after it.
+    if (DEMO && frog.onPad) {
+      const cur = frog.onPad;
+      const idx = pads.indexOf(cur);
+      const flightFrames = 2 * 12.2 / 0.55;
+      const travel = flightFrames * 5.2; // constant: air scroll is always 5.2
+      const slipping = (cur.x + cur.w) - frog.x < 25;
+      for (let k = 1; k <= 2; k++) {
+        const target = pads[idx + k];
+        if (!target) break;
+        const d = target.x - frog.x;
+        const lo = travel - target.w, hi = travel;
+        const ideal = travel - target.w / 2;
+        if (d <= ideal && d >= lo) { jump(); break; }
+        if (slipping && d <= hi && d >= lo) { jump(); break; }
+        if (d > hi) break; // further pads are even farther away
+      }
+    }
+    updateFx();
+  }
+
+  function updateFx() {
+    for (const p of parts) { p.x += p.vx; p.y += p.vy; p.vy += 0.22; p.life--; }
+    parts = parts.filter(p => p.life > 0);
+    if (Math.random() < 0.02) clouds.push({ x: W + 60, y: 30 + Math.random() * 90, s: 0.6 + Math.random() * 0.9, v: 0.3 + Math.random() * 0.4 });
+    for (const c of clouds) c.x -= c.v;
+    clouds = clouds.filter(c => c.x > -140);
+  }
+
+  // ---------- rendering ----------
+  function draw() {
+    // sky
+    const sky = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+    sky.addColorStop(0, '#8fd4ff'); sky.addColorStop(1, '#c9ecff');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, WATER_Y);
+    // sun
+    ctx.fillStyle = '#fff3a6';
+    ctx.beginPath(); ctx.arc(850, 66, 34, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,243,166,.35)';
+    ctx.beginPath(); ctx.arc(850, 66, 48, 0, Math.PI * 2); ctx.fill();
+    // clouds
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    for (const c of clouds) {
+      ctx.beginPath();
+      ctx.ellipse(c.x, c.y, 46 * c.s, 18 * c.s, 0, 0, Math.PI * 2);
+      ctx.ellipse(c.x + 30 * c.s, c.y + 4, 30 * c.s, 14 * c.s, 0, 0, Math.PI * 2);
+      ctx.ellipse(c.x - 32 * c.s, c.y + 5, 28 * c.s, 13 * c.s, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // distant reeds
+    ctx.strokeStyle = '#4c9a5f'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    for (let x = 20; x < W; x += 90) {
+      const h = 34 + ((x * 7) % 26);
+      ctx.beginPath(); ctx.moveTo(x, WATER_Y); ctx.lineTo(x + 6, WATER_Y - h); ctx.stroke();
+    }
+    // water
+    const wat = ctx.createLinearGradient(0, WATER_Y, 0, H);
+    wat.addColorStop(0, '#3aa7d6'); wat.addColorStop(1, '#1d6fb8');
+    ctx.fillStyle = wat; ctx.fillRect(0, WATER_Y, W, H - WATER_Y);
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 7; i++) {
+      const y = WATER_Y + 18 + i * 14;
+      const off = (time * (0.6 + i * 0.12)) % 120;
+      ctx.beginPath();
+      for (let x = -120 + off; x < W + 120; x += 120) {
+        ctx.moveTo(x, y); ctx.quadraticCurveTo(x + 30, y - 4, x + 60, y);
+      }
+      ctx.stroke();
+    }
+
+    for (const p of pads) drawPad(p, time);
+    for (const f of flies) drawFly(f, time);
+    for (const p of parts) {
+      ctx.globalAlpha = Math.max(0, p.life / 30);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3.4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    if (frog && state !== 'over') drawFrog(frog, time);
+
+    // HUD
+    ctx.fillStyle = 'rgba(15,43,29,.55)';
+    ctx.beginPath(); ctx.roundRect(14, 12, 150, 52, 12); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText('⭐ ' + score, 26, 47);
+    ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.font = '13px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText('BEST ' + best, 176, 30);
+    if (DEMO) { ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.fillText('demo', 176, 50); }
+
+    if (state === 'start') {
+      ctx.fillStyle = 'rgba(10,30,20,.45)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+      ctx.font = 'bold 54px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('🐸 FROG HOP', W / 2, 200);
+      ctx.font = '21px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#d9ffe4';
+      ctx.fillText('Hop the lily pads. Eat the flies. Don\'t splash!', W / 2, 246);
+      const pulse = 0.65 + Math.sin(time / 14) * 0.35;
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 24px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('CLICK or press SPACE to start', W / 2, 320);
+      ctx.globalAlpha = 1; ctx.textAlign = 'left';
+    }
+    if (state === 'over') {
+      ctx.fillStyle = 'rgba(10,30,20,.5)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+      ctx.font = 'bold 46px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('💦 SPLASH!', W / 2, 210);
+      ctx.font = '26px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Score: ' + score + '   ·   Best: ' + best, W / 2, 260);
+      ctx.font = 'bold 22px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#ffe9a8';
+      ctx.fillText(DEMO ? 'Starting a new run…' : 'Click or press R to play again', W / 2, 320);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // ---------- main loop ----------
+  clouds = [{ x: 200, y: 60, s: 1, v: 0.4 }, { x: 520, y: 110, s: 0.7, v: 0.3 }, { x: 780, y: 44, s: 0.9, v: 0.5 }];
+  frog = newFrog();
+  pads = [newPad(120, WATER_Y - 8)];
+  pads[0].w = 150;
+  for (let i = 1; i < 7; i++) pads.push(newPad(280 + i * 150, WATER_Y - 8 - (Math.random() * 26 | 0)));
+  frog.onPad = pads[0];
+
+  function loop() { update(); draw(); requestAnimationFrame(loop); }
+  loop();
+
+  canvas.addEventListener('pointerdown', jump);
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); jump(); }
+    if (e.code === 'KeyR' && state === 'over') reset();
+  });
+  // expose state for the video recorder
+  window.__froghop = { get state() { return state; }, get score() { return score; },
+    get stats() { return { ...stats }; } };
+})();
+</script>
+</body>
+</html>
